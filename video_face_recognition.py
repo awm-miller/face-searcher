@@ -14,15 +14,21 @@ import psutil
 import torch  # To check for CUDA availability
 import random
 from PIL import Image, ImageEnhance
+import threading
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
 
 class VideoFaceRecognizer:
-    def __init__(self, faces_library_path: str, detection_model: str = "hog"):
+    def __init__(self, faces_library_path: str, detection_model: str = "hog", 
+                 batch_size: int = 4, max_queue_size: int = 32):
         """
         Initialize the face recognizer with a library of known faces.
         
         Args:
             faces_library_path (str): Path to the directory containing known face images
             detection_model (str): Face detection model to use - either "hog" (faster) or "cnn" (more accurate, requires GPU)
+            batch_size (int): Number of frames to read at a time
+            max_queue_size (int): Maximum number of frames to process or write at a time
         """
         # Print system info
         print("\n=== System Information ===")
@@ -45,6 +51,8 @@ class VideoFaceRecognizer:
             print("\n⚠️ WARNING: Using CNN model without CUDA support may be very slow!")
             print("Consider using --model hog for better performance on CPU\n")
             
+        self.batch_size = batch_size
+        self.max_queue_size = max_queue_size
         self.load_known_faces()
 
     def _get_file_metadata(self, image_path: Path) -> dict:
@@ -503,6 +511,33 @@ class VideoFaceRecognizer:
             if out is not None:
                 out.release()
             print("[DEBUG] Cleanup completed")
+
+    def _process_single_frame(self, frame):
+        """Process a single frame and return face locations and names."""
+        if not frame.flags['C_CONTIGUOUS']:
+            frame = np.ascontiguousarray(frame)
+        rgb_frame = frame[:, :, ::-1]
+        
+        face_locations = face_recognition.face_locations(rgb_frame, 
+                                                       model=self.detection_model,
+                                                       number_of_times_to_upsample=1)
+        
+        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+        
+        face_names = []
+        for face_encoding in face_encodings:
+            matches = face_recognition.compare_faces(
+                self.known_face_encodings,
+                face_encoding,
+                tolerance=0.6
+            )
+            name = "Unknown"
+            if True in matches:
+                first_match_index = matches.index(True)
+                name = self.known_face_names[first_match_index]
+            face_names.append(name)
+        
+        return face_locations, face_names
 
 def main():
     try:
